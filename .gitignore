@@ -1,7 +1,0 @@
-.env
-__pycache__/
-*.pyc
-uploads/
-*.csv
-*.json
-Release-26.02.0-0/
