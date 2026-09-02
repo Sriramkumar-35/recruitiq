@@ -194,30 +194,46 @@ def check_experience_requirement(jd_text, resume_text):
     }
 
 # ===== SCORER =====
+import os
+import requests as http_requests
+
 def score_resume_text(resume_text, jd_text):
-    prompt = f"""You are an expert recruiter with 10 years experience.
-Score this resume against the job description on a scale of 0-100.
-Return ONLY valid JSON — no extra text.
+    # Try local fine-tuned model first
+    local_url = os.environ.get("LOCAL_MODEL_URL")
 
-STRICT RULES:
-- Only mention skills EXPLICITLY written in the resume
-- key_matches must only contain skills found word-for-word in resume
-- key_gaps must only contain skills from JD missing in resume
+    if local_url:
+        try:
+            response = http_requests.post(
+                f"{local_url}/score_local",
+                json={
+                    "resume": resume_text,
+                    "jd": jd_text
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "ngrok-skip-browser-warning": "true"
+                },
+                timeout=60
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if 'error' not in result:
+                    result['model_used'] = 'fine-tuned-lora-v2'
+                    return result
+        except Exception as e:
+            print(f"Local model unavailable: {e} — falling back to Groq")
 
-JOB DESCRIPTION:
-{jd_text[:1000]}
-
-RESUME:
-{resume_text[:1000]}
-
-Return exactly this JSON:
-{{
-  "score": <integer 0-100>,
-  "confidence": <integer 0-100>,
-  "reasoning": "<2 sentences>",
-  "key_matches": ["skill1", "skill2", "skill3"],
-  "key_gaps": ["gap1", "gap2", "gap3"]
-}}"""
+    # Fallback to Groq
+    prompt = "You are an expert recruiter with 10 years experience.\n"
+    prompt += "Score this resume against the job description on a scale of 0-100.\n"
+    prompt += "Return ONLY valid JSON.\n\n"
+    prompt += "JOB DESCRIPTION:\n" + jd_text[:1000] + "\n\n"
+    prompt += "RESUME:\n" + resume_text[:1000] + "\n\n"
+    prompt += '{\n  "score": <integer 0-100>,\n'
+    prompt += '  "confidence": <integer 0-100>,\n'
+    prompt += '  "reasoning": "<2 sentences>",\n'
+    prompt += '  "key_matches": ["skill1", "skill2"],\n'
+    prompt += '  "key_gaps": ["gap1", "gap2"]\n}'
 
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
@@ -229,21 +245,7 @@ Return exactly this JSON:
     raw = response.choices[0].message.content.strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
     result = json.loads(raw)
-
-    confidence = result.get('confidence', 100)
-    if confidence < 40:
-        result['warning'] = 'Low confidence — resume may be unreadable'
-        result['score'] = min(result['score'], 30)
-
-    result['score'] = max(0, min(100, int(result.get('score', 0))))
-
-    verified_matches = []
-    resume_lower = resume_text.lower()
-    for skill in result.get('key_matches', []):
-        if skill.lower() in resume_lower:
-            verified_matches.append(skill)
-    result['key_matches'] = verified_matches
-
+    result['model_used'] = 'groq-base'
     return result
 
 # ===== IMPROVEMENT RECOMMENDATIONS =====
