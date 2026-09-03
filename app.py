@@ -198,11 +198,17 @@ import os
 import requests as http_requests
 
 def score_resume_text(resume_text, jd_text):
-    # Try local fine-tuned model first
+    # =========================================================
+    # 1. TRY LOCAL FINE-TUNED LORA MODEL FIRST
+    # =========================================================
     local_url = os.environ.get("LOCAL_MODEL_URL")
 
     if local_url:
+        local_url = local_url.rstrip("/")
+
         try:
+            print(f"Trying local model: {local_url}")
+
             response = http_requests.post(
                 f"{local_url}/score_local",
                 json={
@@ -213,39 +219,103 @@ def score_resume_text(resume_text, jd_text):
                     "Content-Type": "application/json",
                     "ngrok-skip-browser-warning": "true"
                 },
-                timeout=60
+                timeout=90
             )
+
+            print("Local model status:", response.status_code)
+            print("Local model response:", response.text[:1000])
+
             if response.status_code == 200:
                 result = response.json()
-                if 'error' not in result:
-                    result['model_used'] = 'fine-tuned-lora-v2'
-                    return result
-        except Exception as e:
-            print(f"Local model unavailable: {e} — falling back to Groq")
 
-    # Fallback to Groq
-    prompt = "You are an expert recruiter with 10 years experience.\n"
-    prompt += "Score this resume against the job description on a scale of 0-100.\n"
-    prompt += "Return ONLY valid JSON.\n\n"
-    prompt += "JOB DESCRIPTION:\n" + jd_text[:1000] + "\n\n"
-    prompt += "RESUME:\n" + resume_text[:1000] + "\n\n"
-    prompt += '{\n  "score": <integer 0-100>,\n'
-    prompt += '  "confidence": <integer 0-100>,\n'
-    prompt += '  "reasoning": "<2 sentences>",\n'
-    prompt += '  "key_matches": ["skill1", "skill2"],\n'
-    prompt += '  "key_gaps": ["gap1", "gap2"]\n}'
+                if "error" not in result and "score" in result:
+                    result["model_used"] = "fine-tuned-lora-v2"
+                    return result
+
+        except Exception as e:
+            print(f"Local model unavailable: {e}")
+            print("Falling back to Groq...")
+
+    # =========================================================
+    # 2. GROQ FALLBACK
+    # =========================================================
+
+    prompt = f"""
+You are an expert recruiter with 10 years of experience.
+
+Evaluate the candidate resume against the job description.
+
+JOB DESCRIPTION:
+{jd_text[:1500]}
+
+RESUME:
+{resume_text[:1500]}
+
+Return ONLY valid JSON.
+Do not use markdown.
+Do not use ```.
+
+Use exactly this format:
+
+{{
+  "score": 75,
+  "confidence": 90,
+  "reasoning": "Brief explanation of the candidate's suitability.",
+  "key_matches": ["Python", "Flask"],
+  "key_gaps": ["Docker", "AWS"]
+}}
+"""
 
     response = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=300,
-        temperature=0,
-        seed=42
+        model="openai/gpt-oss-120b",
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        max_tokens=500,
+        temperature=0
     )
+
     raw = response.choices[0].message.content.strip()
-    raw = raw.replace("```json", "").replace("```", "").strip()
-    result = json.loads(raw)
-    result['model_used'] = 'groq-base'
+
+    print("Groq raw response:")
+    print(raw)
+
+    # Remove markdown code fences if the model adds them
+    raw = raw.replace("```json", "")
+    raw = raw.replace("```", "")
+    raw = raw.strip()
+
+    # ---------------------------------------------------------
+    # Extract JSON object if extra text is returned
+    # ---------------------------------------------------------
+    start = raw.find("{")
+    end = raw.rfind("}")
+
+    if start != -1 and end != -1 and end > start:
+        raw = raw[start:end + 1]
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print("JSON parsing error:", e)
+        print("Invalid Groq response:", raw)
+
+        # Safe fallback so the application does not crash
+        return {
+            "score": 0,
+            "confidence": 0,
+            "reasoning": "The AI model returned an invalid response format.",
+            "key_matches": [],
+            "key_gaps": [],
+            "model_used": "groq-base",
+            "error": "Invalid JSON response from Groq"
+        }
+
+    result["model_used"] = "groq-base"
+
     return result
 
 # ===== IMPROVEMENT RECOMMENDATIONS =====
@@ -276,7 +346,7 @@ Return ONLY valid JSON:
 }}"""
 
     response = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="openai/gpt-oss-120b",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=600,
         temperature=0,
